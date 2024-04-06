@@ -20,6 +20,7 @@ extern bool core_option_soft_reset;
 extern bool core_serialize_write; // current serialization direction
 extern int core_crashtime;
 extern bool core_show_welcome;
+extern bool core_boot_alert;
 extern bool core_first_reset;
 extern bool core_perf_display;
 extern bool core_midi_enable;
@@ -110,6 +111,7 @@ extern void core_disk_drive_reinsert(void); // used after cold reboot
 extern void core_disk_swap(void); // convenience for: eject, next disk, insert
 
 extern unsigned get_num_images(void);
+extern bool get_image_path(unsigned index, char* path, size_t len);
 extern bool get_image_label(unsigned index, char* label, size_t len);
 
 // simple file save, as a complete buffer

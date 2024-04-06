@@ -46,6 +46,11 @@ const uint64_t QUIRKS = RETRO_SERIALIZATION_QUIRK_ENDIAN_DEPENDENT;
 // Then run hatary_state_compare.py in your saves folder to compare the timelines.
 #define DEBUG_SAVESTATE_DUMP   0
 
+// Dumps a savestate to the saves folder X frames after starting the core content.
+// Intended for automated comparisons between versions, looking for cross-platform divergence.
+// When using this, disable host mouse and keyboard to prevent input divergence.
+#define DEBUG_SAVESTATE_DUMP_AUTO   0
+
 // Simpler savestate integrity test: whenever a savestate is saved, it will store another state in X frames,
 // and then every savestate restore will compare its own state after X frames. 0 to disable.
 // Try to test with different delays, 1 frame, 10 frames, 100 frames, etc.
@@ -57,7 +62,7 @@ const uint64_t QUIRKS = RETRO_SERIALIZATION_QUIRK_ENDIAN_DEPENDENT;
 // Turn off hatarib_savestate_floppy_modify (Floppy Savestate Safety Save) in the core settings before testing savestates,
 // because it causes bContentsChanged divergence for any floppies that have save files.
 
-#define DEBUG_SAVESTATE   (DEBUG_SAVESTATE_DUMP | DEBUG_SAVESTATE_SIMPLE)
+#define DEBUG_SAVESTATE   (DEBUG_SAVESTATE_DUMP | DEBUG_SAVESTATE_DUMP_AUTO | DEBUG_SAVESTATE_SIMPLE)
 
 //
 // Libretro
@@ -108,6 +113,7 @@ int core_crashtime = 10;
 int core_crash_frames = 0; // reset to 0 whenever CORE_RUNFLAG_HALT
 bool core_option_soft_reset = false;
 bool core_show_welcome = true;
+bool core_boot_alert = true;
 bool core_first_reset = true;
 bool core_perf_display = false;
 bool core_midi_enable = true;
@@ -641,6 +647,9 @@ static int debug_snapshot_buffer_size = 0;
 static int debug_snapshot_countdown = 0;
 static bool debug_snapshot_read = false;
 #endif
+#if DEBUG_SAVESTATE_DUMP_AUTO
+static int debug_savestate_dump_auto = 0;
+#endif
 
 static void core_snapshot_open_internal(void)
 {
@@ -1172,7 +1181,7 @@ RETRO_API void retro_run(void)
 		PERF_START(PERF_RUN_RESET);
 		core_config_reset(); // can apply boot parameters (e.g. CPU Freq)
 		bool cold = core_runflags & CORE_RUNFLAG_RESET_COLD;
-		if (!core_first_reset)
+		if (!core_first_reset && core_boot_alert)
 			core_signal_alert(cold ? "Cold Boot" : "Warm Boot");
 		else
 			core_first_reset = false;
@@ -1362,6 +1371,38 @@ RETRO_API void retro_run(void)
 		}
 	}
 #endif
+#if DEBUG_SAVESTATE_DUMP_AUTO
+	if (debug_savestate_dump_auto > 0)
+	{
+		--debug_savestate_dump_auto;
+		if (debug_savestate_dump_auto == 0)
+		{
+			snapshot_buffer_prepare(snapshot_size,NULL);
+			core_serialize(true);
+			char name[256] = "hatarib_auto_";
+			get_image_path(0,name+13,sizeof(name)-14);
+			strcat_trunc(name,".dump",sizeof(name));
+			corefile* f = core_file_open_save(name,CORE_FILE_WRITE);
+			if (f)
+			{
+				core_file_write(snapshot_buffer,1,snapshot_size,f);
+				// section pos/name suffix
+				for (int i=0; i<debug_snapshot_section_count; ++i)
+				{
+					core_file_write(&debug_snapshot_section_pos[i],sizeof(int),1,f);
+					int sl = 0;
+					if ((i+1) < debug_snapshot_section_count) sl = debug_snapshot_section_pos[i+1] - debug_snapshot_section_pos[i];
+					core_file_write(&sl,sizeof(int),1,f);
+					char pn[9] = "        ";
+					strcpy_trunc(pn,debug_snapshot_section_name[i],sizeof(pn));
+					core_file_write(pn,1,sizeof(pn)-1,f);
+				}
+				core_file_close(f);
+				core_signal_alert2("AUTO DUMP: ",name);
+			}
+		}
+	}
+#endif
 }
 
 RETRO_API size_t retro_serialize_size(void)
@@ -1453,6 +1494,10 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game)
 		snapshot_size += (SNAPSHOT_ROUND - (snapshot_size % SNAPSHOT_ROUND));
 
 	retro_memory_maps();
+
+#if DEBUG_SAVESTATE_DUMP_AUTO
+	debug_savestate_dump_auto = DEBUG_SAVESTATE_DUMP_AUTO;
+#endif
 
 	return true;
 }
