@@ -10,18 +10,29 @@
 #include "../hatari/src/includes/unzip.h"
 
 #define MAX_DISKS 32
-#define MAX_FILENAME 256
+
+#define M3U_EXTENSIONS "m3u\0" "m3u8\0" "\0"
+#define DISK_EXTENSIONS "st\0" "msa\0" "dim\0" "stx\0" "ipf\0" "ctr\0" "raw\0" "\0"
+#define HD_EXTENSIONS "acsi\0" "ahd\0" "vhd\0" "scsi\0" "shd\0" "ide\0" "gem\0" "\0"
+#define ZIP_EXTENSIONS "zip\0" "zst\0" "\0"
+#define GZ_EXTENSIONS "gz\0" "\0"
+#define STX_EXTENSIONS "stx\0" "\0"
+#define HD_ACSI_EXTENSIONS "acsi\0" "ahd\0" "vhd\0" "\0"
+#define HD_SCSI_EXTENSIONS "scsi\0" "shd\0" "\0"
+#define HD_IDE_EXTENSIONS "ide\0" "\0"
+#define HD_GEM_EXTENSIONS "gem\0" "\0"
+#define STX_SAVE_EXT "wd1772"
 
 struct disk_image
 {
 	// primary file
 	uint8_t* data;
 	unsigned int size;
-	char filename[MAX_FILENAME];
+	char filename[CORE_MAX_FILENAME];
 	// secondary file (used for STX save)
 	uint8_t* extra_data;
 	unsigned int extra_size;
-	char extra_filename[MAX_FILENAME];
+	char extra_filename[CORE_MAX_FILENAME];
 	// whether the file has a save
 	bool saved;
 };
@@ -36,7 +47,7 @@ static int drive;
 static unsigned int image_index[2];
 static bool image_insert[2];
 static unsigned int image_count;
-static int initial_image;
+static int boot_index[2];
 
 //
 // Hatari interface
@@ -72,6 +83,8 @@ void disks_clear()
 	// Hatari ejects both disks
 	core_floppy_eject(0);
 	core_floppy_eject(1);
+	boot_index[0] = -1;
+	boot_index[1] = -1;
 }
 
 //
@@ -115,7 +128,7 @@ static bool set_eject_state_drive(bool ejected, int d)
 		disks[image_index[d]].data, disks[image_index[d]].size,
 		disks[image_index[d]].extra_data, disks[image_index[d]].extra_size))
 	{
-		static char floppy_error_msg[MAX_FILENAME+256];
+		static char floppy_error_msg[CORE_MAX_FILENAME+256];
 		struct retro_message_ext msg;
 		snprintf(floppy_error_msg, sizeof(floppy_error_msg), "%c: disk failure: %s",d?'B':'A',disks[image_index[d]].filename);
 		msg.msg = floppy_error_msg;
@@ -179,8 +192,13 @@ unsigned get_num_images(void)
 
 static bool add_image_index(void);
 static bool replace_image_index(unsigned index, const struct retro_game_info* game);
+static uint8_t* load_zip_search_file(unzFile* zip, const char* zip_filename, size_t* filesize, const char* search_filename);
 
-static bool load_m3u(uint8_t* data, unsigned int size, const char* m3u_path, unsigned first_index)
+//
+// M3U files
+//
+
+static bool load_m3u(uint8_t* data, unsigned int size, const char* m3u_path, unsigned first_index, unzFile* zip)
 {
 	static char path[2048] = "";
 	static char link[2048] = "";
@@ -192,7 +210,7 @@ static bool load_m3u(uint8_t* data, unsigned int size, const char* m3u_path, uns
 	disks[first_index].size = 0;
 	disks[first_index].saved = false;
 
-	retro_log(RETRO_LOG_INFO,"load_m3u(%d,'%s',%d)\n",size,m3u_path?m3u_path:"NULL",first_index);
+	retro_log(RETRO_LOG_INFO,"load_m3u(%d,'%s',%d,%s)\n",size,m3u_path?m3u_path:"NULL",first_index,zip?"ZIP":"filesystem");
 
 	// find the base path
 	if (m3u_path == NULL)
@@ -200,6 +218,7 @@ static bool load_m3u(uint8_t* data, unsigned int size, const char* m3u_path, uns
 		retro_log(RETRO_LOG_ERROR,"load_m3u with no path?\n");
 		m3u_path = "";
 	}
+	// use the M3U's directory as our base path
 	strcpy_trunc(path,m3u_path,sizeof(path));
 	{
 		int e = strlen(path);
@@ -272,21 +291,74 @@ static bool load_m3u(uint8_t* data, unsigned int size, const char* m3u_path, uns
 						break;
 					}
 				}
+
+				// invalidate this image in case it's not found
+				strcpy(disks[index].filename,"<Missing>");
+				disks[index].data = NULL;
+				disks[index].size = 0;
+				disks[index].saved = false;
+
+				bool file_result = true;
+
+				uint8_t* zdata = NULL;
+				if (zip) // load the ZIP data
+				{
+					file_result = false;
+					if (has_extension(link,HD_EXTENSIONS))
+					{
+						retro_log(RETRO_LOG_ERROR,"Hard disk image not supported inside ZIP: '%s'\n",link);
+					}
+					else
+					{
+						// NOTE: The zip search does not support or a path using ./ or ../ but it is probably
+						//       unnessary to resolve this. I can't think of a reason to put images above the M3U,
+						//       only at the same level or below. Also, ZIP standardizes paths as UTF-8,
+						//       which is good since M3U8 is UTF-8 too.
+						
+						// ZIP specifies only '/' as the path separator
+						for (char* c = link; *c; ++c) { if(*c=='\\') *c='/'; }
+
+						size_t zsize;
+						zdata = load_zip_search_file(zip, m3u_path, &zsize, link);
+						if (zdata)
+						{
+							info.data = zdata;
+							info.size = zsize;
+							file_result = true;
+						}
+					}
+				}
+
 				// load the file
-				bool file_result = replace_image_index(index, &info);
-				//
+				if (file_result) file_result = replace_image_index(index, &info);
 				if (first)
 				{
 					result = file_result;
 					first = false;
 				}
 				else if (!file_result) result = false;
+				free(zdata);
 			}
 			else if (lp != 0 && !strncasecmp(line,"#AUTO:",6)) // EXTM3U AUTO directive passed to Hatari --auto parameter.
 			{
 				const char* auto_start = line+6;
 				while (*auto_start == ' ' || *auto_start == '\t') ++auto_start; // skip leading whitespace
 				core_auto_start(auto_start);
+			}
+			else if (lp != 0 && (!strncasecmp(line,"#BOOTA:",7) || !strncasecmp(line,"#BOOTB:",7))) // EXTM3U BOOTA/BOOTB directive
+			{
+				const char* boot = line+7;
+				int d = line[5] - 'A';
+				while (*boot == ' ' || *boot == '\t') ++boot;
+				if (*boot == 0)
+				{
+					boot_index[d] = 0; // empty drive
+				}
+				else
+				{
+					boot_index[d] = strtol(boot,NULL,10);
+					if (boot_index[d] < 0) boot_index[d] = 0; // treat negative values as empty
+				}
 			}
 			// ready for next line
 			lp = 0;
@@ -304,26 +376,76 @@ static bool load_m3u(uint8_t* data, unsigned int size, const char* m3u_path, uns
 	return result;
 }
 
-// load first file from zip
+//
+// ZIP files
+//
+
+// load current file from ZIP
+static uint8_t* load_zip_current_file(unzFile* zip, const char* zip_filename, size_t* filesize)
+{
+	char filename[CORE_MAX_FILENAME];
+	unz_file_info info;
+	if (filesize) *filesize = 0;
+	retro_log(RETRO_LOG_INFO,"load_zip_current_file(%p,%s,%p)\n",zip,zip_filename,filesize);
+
+	if (UNZ_OK != unzGetCurrentFileInfo(zip, &info, filename, sizeof(filename), NULL, 0, NULL, 0))
+	{
+		retro_log(RETRO_LOG_ERROR,"Could not read ZIP file info: %s\n",zip_filename);
+		return NULL;
+	}
+	if (UNZ_OK != unzOpenCurrentFile(zip))
+	{
+		retro_log(RETRO_LOG_ERROR,"Could not open ZIP file: %s (%s)\n",filename,zip_filename);
+		return NULL;
+	}
+
+	size_t zsize = info.uncompressed_size;
+	uint8_t* data = malloc(zsize);
+	if (data == NULL)
+	{
+		retro_log(RETRO_LOG_ERROR,"Out of memory reading from ZIP file: %s (%s)\n",filename,zip_filename);
+		unzCloseCurrentFile(zip);
+		return NULL;
+	}
+	if (zsize != unzReadCurrentFile(zip, data, zsize))
+	{
+		retro_log(RETRO_LOG_ERROR,"Error reading from ZIP file: %s (%s)\n",filename,zip_filename);
+		free(data);
+		unzCloseCurrentFile(zip);
+		return NULL;
+	}
+	unzCloseCurrentFile(zip);
+
+	if (filesize) *filesize = zsize;
+	return data;
+}
+
+// search for and load a file from ZIP
+static uint8_t* load_zip_search_file(unzFile* zip, const char* zip_filename, size_t* filesize, const char* search_filename)
+{
+	retro_log(RETRO_LOG_INFO,"load_zip_search_file(%p,'%s',%p,'%s')\n",zip,zip_filename,filesize,search_filename);
+	if (filesize) *filesize = 0;
+	if (UNZ_OK != unzLocateFile(zip,search_filename,2)) // case insensitive search
+	{
+		retro_log(RETRO_LOG_ERROR,"File not found in ZIP: %s (%s)\n",search_filename,zip_filename);
+		return NULL;
+	}
+	return load_zip_current_file(zip, zip_filename, filesize);
+}
+
+// load entire ZIP
 static bool load_zip(uint8_t* data, unsigned int size, const char* zip_filename, unsigned first_index)
 {
-	static char base[256] = "";
-	static char link[256] = "";
+	static char link[CORE_MAX_FILENAME] = "";
 	unzFile zip = NULL;
 
 	// remove data from disks (take ownership of *data)
-	strcpy(disks[first_index].filename,"<zip>");
+	strcpy(disks[first_index].filename,"<ZIP>");
 	disks[first_index].data = NULL;
 	disks[first_index].size = 0;
 	disks[first_index].saved = false;
 
-	if (zip_filename)
-	{
-		// retroarch prefixes zip-unpacked files with the zip-name + #, following suit
-		strcpy_trunc(base,zip_filename,sizeof(base));
-		strcat_trunc(base,"#",sizeof(base));
-	}
-	else zip_filename = "<NULL>";
+	if (!zip_filename) zip_filename = "<Unknown ZIP>";
 
 	retro_log(RETRO_LOG_INFO,"load_zip(%d,'%s',%d)\n",size,zip_filename,first_index);
 
@@ -344,71 +466,149 @@ static bool load_zip(uint8_t* data, unsigned int size, const char* zip_filename,
 
 	char zip_file_filename[512];
 	unz_file_info zip_file_info;
+
+	// look for M3U first
+	retro_log(RETRO_LOG_DEBUG,"Scanning ZIP for M3U: %s\n",zip_filename);
+	while (UNZ_OK ==  unzGetCurrentFileInfo(zip, &zip_file_info, zip_file_filename, sizeof(zip_file_filename), NULL, 0, NULL, 0))
+	{
+		retro_log(RETRO_LOG_DEBUG,"ZIP M3U scan: '%s'\n",zip_file_filename);
+		if (has_extension(zip_file_filename,M3U_EXTENSIONS))
+		{
+			// load the M3U
+			size_t zsize;
+			uint8_t* zdata = load_zip_current_file(zip, zip_filename, &zsize);
+			if (zdata)
+			{
+				bool result = load_m3u(zdata,zsize,zip_file_filename,first_index,zip); // load_m3u now owns zdata
+				unzClose(zip); free(data);
+				return result;
+			}
+			unzClose(zip); free(data);
+			return false;
+		}
+		if (UNZ_OK != unzGoToNextFile(zip)) break;
+	}
+
+	// No M3U just load the files in the order they're found
+	retro_log(RETRO_LOG_DEBUG,"No M3U found, loading all files in ZIP: %s\n",zip_filename);
+	if (UNZ_OK != unzGoToFirstFile(zip))
+	{
+		retro_log(RETRO_LOG_ERROR,"Could not find first file in ZIP: %s\n",zip_filename);
+		unzClose(zip); free(data); return false;
+	}
+	bool first = true;
+	bool result = false;
 	while (true)
 	{
 		if (UNZ_OK != unzGetCurrentFileInfo(zip, &zip_file_info, zip_file_filename, sizeof(zip_file_filename), NULL, 0, NULL, 0))
 		{
-			retro_log(RETRO_LOG_ERROR,"Could not read file info in ZIP file: %s\n",zip_filename);
-			free(data);
-			return false;
+			retro_log(RETRO_LOG_ERROR,"Could not read ZIP file info: %s\n",zip_filename);
+			unzClose(zip); free(data); return false;
 		}
-		retro_log(RETRO_LOG_DEBUG,"Zip contains: '%s'\n",zip_file_filename);
-		if (has_extension(zip_file_filename,"st\0" "msa\0" "dim\0" "stx\0" "ipf\0" "ctr\0" "raw\0" "\0"))
-			break; // found a file
-		if (UNZ_OK != unzGoToNextFile(zip))
+		retro_log(RETRO_LOG_DEBUG,"ZIP contains: '%s'\n",zip_file_filename);
+		if (has_extension(zip_file_filename,DISK_EXTENSIONS))
 		{
-			retro_log(RETRO_LOG_ERROR,"Could not find a disk image in ZIP file: %s\n",zip_filename);
-			free(data);
-			return false;
+			size_t zsize;
+			uint8_t* zdata = load_zip_current_file(zip, zip_filename, &zsize);
+			if (!zdata)
+			{
+				result = false;
+			}
+			else
+			{
+				int index = first_index;
+				if (!first)
+				{
+					index = get_num_images();
+					if (!add_image_index())
+					{
+						retro_log(RETRO_LOG_ERROR,"Too many disks loaded, stopping ZIP before: %s\n",link);
+						result = false;
+						break;
+					}
+				}
+
+				struct retro_game_info info;
+				memset(&info,0,sizeof(info));
+				info.path = zip_file_filename;
+				info.data = zdata;
+				info.size = zsize;
+				info.meta = NULL;
+				bool file_result = replace_image_index(index, &info);
+				free(zdata);
+				if (first && file_result)
+				{
+					first = false;
+					result = true;
+				}
+				else if (!file_result) result = false;
+			}
 		}
+		if (UNZ_OK != unzGoToNextFile(zip)) break;
 	};
+	unzClose(zip);
+	free(data);
+	return result;
+}
 
-	if (UNZ_OK != unzOpenCurrentFile(zip))
-	{
-		retro_log(RETRO_LOG_ERROR,"Could not open disk image in ZIP file: %s (%s)\n",zip_filename,zip_file_filename);
-		free(data);
-		return false;
-	}
+//
+// GZ gzip files
+//
 
-	size_t zsize = zip_file_info.uncompressed_size;
+uint8_t* unzip_gz(const uint8_t* gz_data, size_t gz_size, const char* gz_filename, size_t* filesize, size_t size_estimate)
+{
+	size_t zsize = size_estimate; // gz does not contain its size: start with estimate, realloc later if needed
+	if (filesize) *filesize = 0;
+
 	uint8_t* zdata = malloc(zsize);
 	if (zdata == NULL)
 	{
-		retro_log(RETRO_LOG_ERROR,"Out of memory reading disk image from ZIP file: %s (%s)\n",zip_filename,zip_file_filename);
-		free(data);
-		return false;
+		retro_log(RETRO_LOG_ERROR,"Could not unzip gz, out of memory (%d bytes): '%s'\n",gz_filename,(int)zsize);
+		return NULL;
 	}
 
-	if (zsize != unzReadCurrentFile(zip, zdata, zsize))
+	z_stream zs;
+	zs.next_in = (Bytef*)gz_data;
+	zs.avail_in = gz_size;
+	zs.total_out = 0;
+	zs.zalloc = Z_NULL;
+	zs.zfree = Z_NULL;
+	if(inflateInit2(&zs,(16+MAX_WBITS)) != Z_OK)
 	{
-		retro_log(RETRO_LOG_ERROR,"Error reading disk image from ZIP file: %s (%s)\n",zip_filename,zip_file_filename);
-		free(zdata);
-		free(data);
-		return false;
+		retro_log(RETRO_LOG_ERROR,"Could not unzip gz, inflateInit2 failure: '%s'\n",gz_filename);
+		return NULL;
 	}
-
-	unzCloseCurrentFile(zip);
-	unzClose(zip);
-
-	strcpy_trunc(link,base,sizeof(link));
-	int e = strlen(zip_file_filename);
-	for(;e>0;--e)
+	while (true)
 	{
-		if (zip_file_filename[e-1] == '/' || zip_file_filename[e-1] == '\\') break;
+		if (zs.total_out >= zsize)
+		{
+			retro_log(RETRO_LOG_INFO,"Size estimate (%d) too small for gz, expanding: %d\n",(int)(zsize*2));
+			zsize *= 2;
+			uint8_t* zdata2 = realloc(zdata, zsize);
+			if (zdata2 == NULL)
+			{
+				retro_log(RETRO_LOG_ERROR,"Could not unzip gz, out of memory (%d bytes): '%s'\n",gz_filename,(int)zsize);
+				inflateEnd(&zs);
+				free(zdata);
+				return NULL;
+			}
+			zdata = zdata2;
+		}
+		zs.next_out = zdata + zs.total_out;
+		zs.avail_out = zsize - zs.total_out;
+		int result = inflate(&zs,Z_SYNC_FLUSH);
+		if (result == Z_STREAM_END) break;
+		if (result != Z_OK)
+		{
+			retro_log(RETRO_LOG_ERROR,"Could not unzip gz, inflate error: '%s'\n",gz_filename);
+			inflateEnd(&zs);
+			free(zdata);
+			return NULL;
+		}
 	}
-	strcat_trunc(link,zip_file_filename+e,sizeof(link));
-
-	struct retro_game_info info;
-	memset(&info,0,sizeof(info));
-	info.path = link;
-	info.data = zdata;
-	info.size = zsize;
-	info.meta = NULL;
-	bool result = replace_image_index(first_index, &info);
-	free(zdata);
-
-	free(data);
-	return result;
+	zsize = zs.total_out;
+	inflateEnd(&zs);
+	return zdata;
 }
 
 static bool load_gz(uint8_t* data, unsigned int size, const char* gz_filename, unsigned first_index)
@@ -428,66 +628,27 @@ static bool load_gz(uint8_t* data, unsigned int size, const char* gz_filename, u
 		if (fnl >= 3)
 			link[fnl-3] = 0;
 	}
-	if(has_extension(link,"m3u\0" "m3u8\0" "\0"))
+	if (has_extension(link,M3U_EXTENSIONS))
 	{
 		retro_log(RETRO_LOG_ERROR,"Cannot load m3u contained in gz: '%s'\n",gz_filename);
 		free(data);
 		return false;
 	}
+	if (has_extension(link,HD_EXTENSIONS))
+	{
+		retro_log(RETRO_LOG_ERROR,"Hard disk image not supported inside gz: '%s'\n",gz_filename);
+		free(data);
+		return false;
+	}
 
-	size_t zsize = 2*1024*1024; // assume up to 2MB by default, realloc later if needed
-	uint8_t* zdata = malloc(zsize);
+	const int DEFAULT_SIZE = 2*1024*1024; // 2MB should be larger than most images, it will realloc if larger.
+	size_t zsize;
+	uint8_t* zdata = unzip_gz(data, size, gz_filename, &zsize, DEFAULT_SIZE);
 	if (zdata == NULL)
 	{
-		retro_log(RETRO_LOG_ERROR,"Could not load_gz, out of memory (%d bytes): '%s'\n",gz_filename,(int)zsize);
 		free(data);
 		return false;
 	}
-
-	z_stream zs;
-	zs.next_in = (Bytef*)data;
-	zs.avail_in = size;
-	zs.total_out = 0;
-	zs.zalloc = Z_NULL;
-	zs.zfree = Z_NULL;
-	if(inflateInit2(&zs,(16+MAX_WBITS)) != Z_OK)
-	{
-		retro_log(RETRO_LOG_ERROR,"Could not load_gz, inflateInit2 failure: '%s'\n",gz_filename);
-		free(data);
-		return false;
-	}
-	while (true)
-	{
-		if (zs.total_out >= zsize) // file is bigger, keep growing
-		{
-			zsize *= 2;
-			uint8_t* zdata2 = realloc(zdata, zsize);
-			if (zdata2 == NULL)
-			{
-				retro_log(RETRO_LOG_ERROR,"Could not load_gz, out of memory (%d bytes): '%s'\n",gz_filename,(int)zsize);
-				inflateEnd(&zs);
-				free(zdata);
-				free(data);
-				return false;
-			}
-			zdata = zdata2;
-		}
-		zs.next_out = zdata + zs.total_out;
-		zs.avail_out = zsize - zs.total_out;
-		int result = inflate(&zs,Z_SYNC_FLUSH);
-		if (result == Z_STREAM_END) break;
-		if (result != Z_OK)
-		{
-			retro_log(RETRO_LOG_ERROR,"Could not load_gz, inflate error: '%s'\n",gz_filename);
-			inflateEnd(&zs);
-			free(zdata);
-			free(data);
-			return false;
-		}
-	}
-	zsize = zs.total_out;
-	inflateEnd(&zs);
-	free(data);
 
 	struct retro_game_info info;
 	memset(&info,0,sizeof(info));
@@ -501,11 +662,15 @@ static bool load_gz(uint8_t* data, unsigned int size, const char* gz_filename, u
 	return result;
 }
 
+//
+// Hard drives
+//
+
 static bool load_hard(const char* path, const char* filename, unsigned index, const char* ext)
 {
 	retro_log(RETRO_LOG_INFO,"load_hard('%s','%s',%d,'%s')\n",path?path:"NULL",filename?filename:"NULL",index,ext);
 
-	strcpy_trunc(disks[index].filename,"<HD>",MAX_FILENAME);
+	strcpy_trunc(disks[index].filename,"<HD>",CORE_MAX_FILENAME);
 	strcat_trunc(disks[index].filename,filename,sizeof(disks[index].filename));
 
 	// find the base path
@@ -516,10 +681,10 @@ static bool load_hard(const char* path, const char* filename, unsigned index, co
 	}
 
 	int ht = -1;
-	if (!strcasecmp(ext,"gem")) ht = 0; // GemDOS
-	else if (!strcasecmp(ext,"acsi") || !strcasecmp(ext,"ahd") || !strcasecmp(ext,"vhd")) ht = 2; // ACSI
-	else if (!strcasecmp(ext,"scsi") || !strcasecmp(ext,"shd")) ht = 3; // SCSI
-	else if (!strcasecmp(ext,"ide")) ht = 4; // IDE (Auto)
+	if      (has_extension(ext,HD_GEM_EXTENSIONS )) ht = 0; // GemDOS
+	else if (has_extension(ext,HD_ACSI_EXTENSIONS)) ht = 2; // ACSI
+	else if (has_extension(ext,HD_SCSI_EXTENSIONS)) ht = 3; // SCSI
+	else if (has_extension(ext,HD_IDE_EXTENSIONS )) ht = 4; // IDE (Auto)
 	if (ht < 0)
 	{
 		retro_log(RETRO_LOG_ERROR,"Unknown hard disk image type: %s",path);
@@ -539,6 +704,10 @@ static bool load_hard(const char* path, const char* filename, unsigned index, co
 	}
 	return core_config_hard_content(path,ht); // Use image name directly
 }
+
+//
+// Disk image handling
+//
 
 static bool replace_image_index(unsigned index, const struct retro_game_info* game)
 {
@@ -585,7 +754,7 @@ static bool replace_image_index(unsigned index, const struct retro_game_info* ga
 		int e = strlen(path);
 		for(;e>0;--e)
 		{
-			if(path[e-1] == '.' && ext == NULL) ext = path + e;
+			if(path[e-1] == '.' && ext == NULL) ext = path + (e-1);
 			if(path[e-1] == '/' || path[e-1] == '\\') break;
 		}
 		path += e;
@@ -603,14 +772,7 @@ static bool replace_image_index(unsigned index, const struct retro_game_info* ga
 	disks[index].extra_size = 0;
 	disks[index].saved = false;
 
-	if (ext && (
-		!strcasecmp(ext,"acsi") ||
-		!strcasecmp(ext,"ahd") ||
-		!strcasecmp(ext,"vhd") ||
-		!strcasecmp(ext,"scsi") ||
-		!strcasecmp(ext,"shd") ||
-		!strcasecmp(ext,"ide") ||
-		!strcasecmp(ext,"gem") ))
+	if (ext && has_extension(ext,HD_EXTENSIONS))
 	{
 		return load_hard(game->path, path, index, ext);
 	}
@@ -626,12 +788,12 @@ static bool replace_image_index(unsigned index, const struct retro_game_info* ga
 			disks[index].size = save_size;
 			disks[index].saved = true;
 		}
-		if (ext && !strcasecmp(ext,"stx")) // STX has a secondary save file used as an overlay
+		if (ext && has_extension(ext,STX_EXTENSIONS)) // STX may have a secondary save file used as an overlay
 		{
-			strcpy_trunc(disks[index].extra_filename,path,MAX_FILENAME);
+			strcpy_trunc(disks[index].extra_filename,path,CORE_MAX_FILENAME);
 			int l = strlen(disks[index].extra_filename);
 			if (l >= 3) disks[index].extra_filename[l-3] = 0;
-			strcat_trunc(disks[index].extra_filename,"wd1772",MAX_FILENAME);
+			strcat_trunc(disks[index].extra_filename,STX_SAVE_EXT,CORE_MAX_FILENAME);
 			unsigned int extra_size = 0;
 			uint8_t* extra_data = core_read_file_save(disks[index].extra_filename,&extra_size);
 			if (extra_data != NULL)
@@ -665,13 +827,13 @@ static bool replace_image_index(unsigned index, const struct retro_game_info* ga
 		}
 		if (disks[index].data == NULL) // we still don't have it
 		{
-			strcpy(disks[index].filename,"<Not Found>");
+			strcpy(disks[index].filename,"<Missing>");
 			disks[index].size = 0;
 			return false;
 		}
 	}
 
-	if (ext && (!strcasecmp(ext,"m3u") || !strcasecmp(ext,"m3u8")))
+	if (ext && has_extension(ext,M3U_EXTENSIONS))
 	{
 		if (game->meta && !strcmp(game->meta,"<m3u>")) // use meta = "<m3u>" to prevent recursive M3Us
 		{
@@ -681,13 +843,13 @@ static bool replace_image_index(unsigned index, const struct retro_game_info* ga
 			strcpy(disks[index].filename,"<M3U can't contain other M3Us>");
 			return false;
 		}
-		return load_m3u(disks[index].data, disks[index].size, game->path, index);
+		return load_m3u(disks[index].data, disks[index].size, game->path, index, NULL);
 	}
-	else if (ext && !strcasecmp(ext,"zip"))
+	else if (ext && has_extension(ext,ZIP_EXTENSIONS))
 	{
 		return load_zip(disks[index].data, disks[index].size, path, index);
 	}
-	else if (ext && !strcasecmp(ext,"gz"))
+	else if (ext && has_extension(ext,GZ_EXTENSIONS))
 	{
 		return load_gz(disks[index].data, disks[index].size, path, index);
 	}
@@ -699,7 +861,7 @@ static bool replace_image_index(unsigned index, const struct retro_game_info* ga
 	}
 	else
 	{
-		strcpy_trunc(disks[index].filename,path,MAX_FILENAME);
+		strcpy_trunc(disks[index].filename,path,CORE_MAX_FILENAME);
 	}
 	return true;
 }
@@ -715,20 +877,7 @@ static bool add_image_index(void)
 	return false;
 }
 
-static bool set_initial_image(unsigned index, const char* path)
-{
-	retro_log(RETRO_LOG_DEBUG,"set_initial_image(%d,%p)\n",index,path);
-	if(path) retro_log(RETRO_LOG_DEBUG,"path: %s\n",path); // logging this path but not doing anything with it
-	//initial_image = index;
-	//return true;
-	// Disabling this. RetroArch appears to give you the last disk you had in the drive, last time you played.
-	// This is inappropriate for Atari ST, where you almost always need a boot disk to start the game.
-	// It also conflicts with the drive B workaround, where RetroArch won't know which drive it is saving the last index of.
-	initial_image = 0;
-	return false;
-}
-
-static bool get_image_path(unsigned index, char* path, size_t len)
+bool get_image_path(unsigned index, char* path, size_t len)
 {
 	//retro_log(RETRO_LOG_DEBUG,"get_image_path(%d,%p,%d)\n",index,path,(int)len);
 	if (index >= MAX_DISKS) return false;
@@ -779,7 +928,7 @@ void core_disk_set_environment(retro_environment_t cb)
 		get_num_images,
 		replace_image_index,
 		add_image_index,
-		set_initial_image,
+		NULL, //set_initial_image, (disable this feature because it is almost never appropriate to boot from a different disk)
 		get_image_path,
 		get_image_label,
 	};
@@ -801,45 +950,80 @@ void core_disk_init(void)
 		first_init = false;
 	}
 	disks_clear();
-	initial_image = 0;
 }
 
 void core_disk_load_game(const struct retro_game_info *game)
 {
 	//retro_log(RETRO_LOG_DEBUG,"core_disk_load_game(%p)\n",game);
+	int initial_image = 0;
 
 	disks_clear();
 	if (game == NULL) return;
 	add_image_index(); // add one disk
 	replace_image_index(0,game); // load it there (may load multiple if M3U/Zip)
 
-	// ensure initial image has data, if possible (avoids selecting hard disk or other invalid image)
-	for (int i=0; i<2; ++i) // two passes to be thorough, in case initial_image is not 0
+	// out of bounds = empty drive
+	for (int i=0; i<2; ++i)
 	{
-		while (initial_image < image_count && disks[initial_image].data == NULL) ++initial_image;
-		if (initial_image >= image_count) initial_image = 0;
+		if (boot_index[i] > (int)image_count) boot_index[i] = 0;
 	}
-	// insert first disk
-	set_image_index(initial_image);
-	set_eject_state(false); // insert it
 
-	// insert second disk if available
-	if (core_disk_enable_b)
+	// fill drives selected by #BOOTA/#BOOTB
+	// reverse order gives BOOTA precedence if they were both the same
+	if (boot_index[1] > 0 && core_disk_enable_b)
 	{
-		int second_image = initial_image + 1;
-		for (int i=0; i<2; ++i)
+		drive = 1;
+		set_image_index(boot_index[1]-1);
+		set_eject_state(false);
+	}
+	if (boot_index[0] > 0)
+	{
+		drive = 0;
+		set_image_index(boot_index[0]-1);
+		set_eject_state(false);
+		initial_image = image_index[0];
+	}
+
+	// automatic boot disk selection
+	if (boot_index[0] < 0)
+	{
+		// ensure initial image has data, if possible (avoids selecting hard disk or other invalid image)
+		for (int i=0; i<2; ++i) // two passes, in case initial_image is not 0
 		{
-			while(second_image < image_count && disks[second_image].data == NULL) ++second_image;
-			if (second_image >= image_count) second_image = 0;
+			while (initial_image < image_count &&
+				(disks[initial_image].data == NULL || (image_insert[1] == true && initial_image == image_index[1])))
+				++initial_image;
+			if (initial_image >= image_count) initial_image = 0;
 		}
-		if (second_image != initial_image && disks[second_image].data != NULL)
+		// insert first disk, if it's not already the second disk
+		if (image_insert[1] == false || (initial_image != image_index[1]))
+		{
+			drive = 0;
+			set_image_index(initial_image);
+			set_eject_state(false);
+		}
+	}
+
+	// automatic second disk selection
+	if (boot_index[1] < 0 && core_disk_enable_b)
+	{
+		int second_image = 0;
+		while(second_image < image_count &&
+			(disks[second_image].data == NULL || (image_insert[0] == true && second_image == image_index[0])))
+			++second_image;
+		if (second_image >= image_count) second_image = 0;
+		// insert second disk, if it exists, and it's not already inserted in drive A
+		if (disks[second_image].data != NULL &&
+			(image_insert[0] == false || (second_image != image_index[0])))
 		{
 			drive = 1;
 			set_image_index(second_image);
 			set_eject_state(false);
-			drive = 0;
 		}
 	}
+
+	// set initial drive
+	drive = 0;
 }
 
 void core_disk_unload_game(void)
@@ -899,7 +1083,6 @@ void core_disk_reindex(void)
 				// do a save test for possible modifications
 				if (core_disk_enable_save && core_savestate_floppy_modify && core_disk_save_exists(infile))
 				{
-					// TODO this doesn't work for STX because it wants an overlay file instead (change extension if STX)
 					core_floppy_changed(d);
 					//retro_log(RETRO_LOG_DEBUG,"Savestate marks uncached floppy contents changed: %s\n",infile);
 				}
@@ -1044,7 +1227,7 @@ bool core_disk_save(const char* filename, uint8_t* data, unsigned int size, bool
 
 void* disk_save_advanced_file = NULL;
 char disk_save_advanced_path[2048] = "";
-char disk_save_advanced_filename[MAX_FILENAME] = "";
+char disk_save_advanced_filename[CORE_MAX_FILENAME] = "";
 
 // buffer to 
 uint8_t* disk_save_advanced_buffer = NULL;
@@ -1162,5 +1345,14 @@ bool core_disk_save_write(const uint8_t* data, unsigned int size, corefile* file
 
 bool core_disk_save_exists(const char* filename)
 {
+	if (has_extension(filename,STX_EXTENSIONS))
+	{
+		char stx_savename[CORE_MAX_FILENAME];
+		strcpy_trunc(stx_savename,filename,CORE_MAX_FILENAME);
+		int l = strlen(stx_savename);
+		if (l >= 3) stx_savename[l-3] = 0;
+		strcat_trunc(stx_savename,STX_SAVE_EXT,CORE_MAX_FILENAME);
+		return core_file_exists_save(stx_savename);
+	}
 	return core_file_exists_save(filename);
 }

@@ -1,3 +1,9 @@
+# BD = core build directory
+# HBD = hatari build subdirectory
+BD ?= build
+HBD ?= build
+ZLIB_BUILD ?= zlib_build
+
 # enables debug symbols, CPU trace logging
 DEBUG ?= 0
 
@@ -14,12 +20,13 @@ WERROR ?= -Wall -Werror
 SHORTHASH = "$(shell git rev-parse --short HEAD || unknown)"
 
 # static libraries
-ZLIB_INCLUDE ?= $(PWD)/zlib_build/include
+ZLIB_INCLUDE ?= $(PWD)/$(ZLIB_BUILD)/include
 SDL2_INCLUDE ?= $(PWD)/SDL/build/include/SDL2
-ZLIB_LIB ?= $(PWD)/zlib_build/lib/libz.a
+ZLIB_LIB ?= $(PWD)/$(ZLIB_BUILD)/lib/libz.a
 SDL2_LIB ?= $(PWD)/SDL/build/lib/libSDL2.a
 SDL2_LINK ?= $(shell $(PWD)/SDL/build/bin/sdl2-config --static-libs)
 ZLIB_LINK ?= $(ZLIB_LIB)
+SDL2_DIR ?= $(PWD)/SDL/build
 # sdl2-config is less than ideal, designed for EXE rather than DLL,
 # it adds -lSDLmain etc. but it seems the best way to get the mac dependencies right
 
@@ -27,15 +34,15 @@ CC ?= gcc
 CFLAGS += \
 	-O3 $(WERROR) -fPIC \
 	-D__LIBRETRO__ -DSHORTHASH=\"$(SHORTHASH)\" \
-	-Ihatari/build -I$(SDL2_INCLUDE)
+	-Ihatari/$(HBD) -I$(SDL2_INCLUDE)
 LDFLAGS += \
-	-shared $(WERROR) -static-libgcc
+	-shared $(WERROR)
 
+CMAKE ?= cmake
 CMAKEFLAGS += \
 	-DZLIB_INCLUDE_DIR=$(ZLIB_INCLUDE) \
 	-DZLIB_LIBRARY=$(ZLIB_LIB) \
-	-DSDL2_INCLUDE_DIR=$(SDL2_INCLUDE) \
-	-DSDL2_LIBRARY=$(SDL2_LIB) \
+	-DSDL2_DIR=$(SDL2_DIR)/lib/cmake/SDL2 \
 	-DCMAKE_DISABLE_FIND_PACKAGE_Readline=1 \
 	-DCMAKE_DISABLE_FIND_PACKAGE_X11=1 \
 	-DCMAKE_DISABLE_FIND_PACKAGE_PNG=1 \
@@ -44,14 +51,14 @@ CMAKEFLAGS += \
 	-DENABLE_SMALL_MEM=0
 CMAKEBUILDFLAGS += $(MULTITHREAD)
 
-ifneq ($(DEBUG),0)
-	CFLAGS += -g
+ifeq ($(DEBUG),1)
+	CFLAGS += -g -DCORE_DEBUG=1
 	LDFLAGS += -g
-	CMAKEFLAGS += -DENABLE_TRACING=1
+	CMAKEFLAGS += -DENABLE_TRACING=1 -DCMAKE_BUILD_TYPE=RelWithDebInfo
 else
-ifneq ($(OS),MacOS)
-	LDFLAGS += -Wl,--strip-debug
-endif
+	ifneq ($(shell uname),Darwin)
+		LDFLAGS += -Wl,--strip-debug
+	endif
 	CMAKEFLAGS += -DENABLE_TRACING=0
 endif
 
@@ -64,10 +71,12 @@ endif
 
 ifeq ($(OS),Windows_NT)
 	SO_SUFFIX=.dll
-else ifeq ($(OS),MacOS)
+	LDFLAGS += -static-libgcc
+else ifeq ($(shell uname),Darwin)
 	SO_SUFFIX=.dylib
 else
 	SO_SUFFIX=.so
+	LDFLAGS += -static-libgcc
 endif
 
 # SF2000
@@ -85,8 +94,7 @@ ifeq ($(platform), sf2000)
    MULTITHREAD = 
 endif
 
-BD=build/
-CORE=$(BD)hatarib$(SO_SUFFIX)
+CORE=$(BD)/hatarib$(SO_SUFFIX)
 SOURCES = \
 	core/core.c \
 	core/core_file.c \
@@ -94,19 +102,23 @@ SOURCES = \
 	core/core_disk.c \
 	core/core_config.c \
 	core/core_osk.c
-OBJECTS = $(SOURCES:%.c=$(BD)%.o)
+OBJECTS = $(SOURCES:%.c=$(BD)/%.o)
 HATARILIBS = \
-	hatari/build/src/libcore.a \
-	hatari/build/src/falcon/libFalcon.a \
-	hatari/build/src/cpu/libUaeCpu.a \
-	hatari/build/src/gui-sdl/libGuiSdl.a \
-	hatari/build/src/libFloppy.a \
-	hatari/build/src/debug/libDebug.a \
-	hatari/build/src/libcore.a \
+	hatari/$(HBD)/src/libcore.a \
+	hatari/$(HBD)/src/falcon/libFalcon.a \
+	hatari/$(HBD)/src/cpu/libUaeCpu.a \
+	hatari/$(HBD)/src/gui-sdl/libGuiSdl.a \
+	hatari/$(HBD)/src/libFloppy.a \
+	hatari/$(HBD)/src/debug/libDebug.a \
+	hatari/$(HBD)/src/libcore.a \
 	$(ZLIB_LINK) $(SDL2_LINK)
 # note: libcore is linked twice to allow other hatari internal libraries to resolve references within it.
 
-default: $(CORE)
+.PHONY: default core full sdl zlib sdlreconfig directories hatarilib clean
+
+default: core
+
+core: $(CORE)
 
 # clean and rebuild everything (including static libs)
 full:
@@ -132,19 +144,19 @@ sdlreconfig:
 
 directories:
 	mkdir -p $(BD)
-	mkdir -p $(BD)core
-	mkdir -p hatari/build
+	mkdir -p $(BD)/core
+	mkdir -p hatari/$(HBD)
 
 $(CORE): directories hatarilib $(OBJECTS)
 	$(CC) -o $(CORE) $(LDFLAGS) $(OBJECTS) $(HATARILIBS)
 
-$(BD)core/%.o: core/%.c hatarilib
+$(BD)/core/%.o: core/%.c hatarilib
 	$(CC) -o $@ $(CFLAGS) -c $< 
 
 hatarilib: directories
-	(cd hatari/build && export CFLAGS="$(CFLAGS)" && cmake .. $(CMAKEFLAGS))
-	(cd hatari/build && export CFLAGS="$(CFLAGS)" && cmake --build . $(CMAKEBUILDFLAGS))
+	(cd hatari/$(HBD) && export CFLAGS="$(CFLAGS)" && $(CMAKE) .. $(CMAKEFLAGS))
+	(cd hatari/$(HBD) && export CFLAGS="$(CFLAGS)" && $(CMAKE) --build . $(CMAKEBUILDFLAGS))
 
 clean:
 	rm -f -r $(BD)
-	rm -f -r hatari/build
+	rm -f -r hatari/$(HBD)

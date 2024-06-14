@@ -16,13 +16,27 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Checkout Files
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       - name: Setup MSYS2
         uses: msys2/setup-msys2@v2
         with:
           msystem: UCRT64
           install: git make mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-cmake
+      - name: Submodule Cache Key
+        shell: pwsh
+        run: |
+          echo "SDLHASH=$($(git submodule status SDL) -replace '\s','')" >> $env:GITHUB_ENV
+          echo "ZLIBHASH=$($(git submodule status zlib) -replace '\s','')" >> $env:GITHUB_ENV
+      - name: Cache Submodules
+        id: cache-sub
+        uses: actions/cache@v4
+        with:
+          path: |
+            SDL/build
+            zlib_build
+          key: sub-win64-${{ env.SDLHASH }}-${{ env.ZLIBHASH }}
       - name: Build SDL2 and zlib
+        if: steps.cache-sub.outputs.cache-hit != 'true'
         shell: msys2 {0}
         run: |
           make -f makefile.zlib
@@ -41,7 +55,7 @@ jobs:
           copy info/*.* artifact/info
           echo "BUILD_TAG=$(git log -1 --format="%ad--%h" --date=format-local:"%Y-%m-%d-%H%M%S")" >> $env:GITHUB_ENV
       - name: Upload Artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: hatarib-win64--${{ env.BUILD_TAG }}
           path: artifact/
@@ -51,13 +65,27 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Checkout Files
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       - name: Setup MSYS2
         uses: msys2/setup-msys2@v2
         with:
           msystem: MINGW32
           install: git make mingw-w64-i686-gcc mingw-w64-i686-cmake
+      - name: Submodule Cache Key
+        shell: pwsh
+        run: |
+          echo "SDLHASH=$($(git submodule status SDL) -replace '\s','')" >> $env:GITHUB_ENV
+          echo "ZLIBHASH=$($(git submodule status zlib) -replace '\s','')" >> $env:GITHUB_ENV
+      - name: Cache Submodules
+        id: cache-sub
+        uses: actions/cache@v4
+        with:
+          path: |
+            SDL/build
+            zlib_build
+          key: sub-win32-${{ env.SDLHASH }}-${{ env.ZLIBHASH }}
       - name: Build SDL2 and zlib
+        if: steps.cache-sub.outputs.cache-hit != 'true'
         shell: msys2 {0}
         run: |
           make -f makefile.zlib
@@ -76,7 +104,7 @@ jobs:
           copy info/*.* artifact/info
           echo "BUILD_TAG=$(git log -1 --format="%ad--%h" --date=format-local:"%Y-%m-%d-%H%M%S")" >> $env:GITHUB_ENV
       - name: Upload Artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: hatarib-win32--${{ env.BUILD_TAG }}
           path: artifact/
@@ -86,12 +114,25 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Files
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       - name: Setup Ubuntu
         run: |
           sudo apt-get update
           sudo apt-get install make gcc cmake
+      - name: Submodule Cache Key
+        run: |
+          echo "SDLHASH=$(git submodule status SDL | tr -d '[:blank:]')" >> $GITHUB_ENV
+          echo "ZLIBHASH=$(git submodule status zlib | tr -d '[:blank:]')" >> $GITHUB_ENV
+      - name: Cache Submodules
+        id: cache-sub
+        uses: actions/cache@v4
+        with:
+          path: |
+            SDL/build
+            zlib_build
+          key: sub-ubuntu-${{ env.SDLHASH }}-${{ env.ZLIBHASH }}
       - name: Build SDL2 and zlib
+        if: steps.cache-sub.outputs.cache-hit != 'true'
         run: |
           make -f makefile.zlib
           make -f makefile.sdl
@@ -107,34 +148,83 @@ jobs:
           cp info/*.* artifact/info
           echo "BUILD_TAG=$(git log -1 --format="%ad--%h" --date=format-local:"%Y-%m-%d-%H%M%S")" >> $GITHUB_ENV
       - name: Upload Artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: hatarib-ubuntu--${{ env.BUILD_TAG }}
           path: artifact/
 
   build-macos:
-    name: MacOS 10.13
+    name: MacOS Fat
     runs-on: macos-latest
     steps:
       - name: Checkout Files
-        uses: actions/checkout@v3
-      - name: Setup MacOS
-        run: brew install make gcc@13 cmake
-        # brew's gcc has to be a specific version, make sure to update 13 above and below if upgrading
-      - name: Build SDL2 and zlib
+        uses: actions/checkout@v4
+      - name: Submodule Cache Key
         run: |
-          export CC=/usr/local/bin/gcc-13
-          export CFLAGS=-mmacosx-version-min=10.13
+          echo "SDLHASH=$(git submodule status SDL | tr -d '[:blank:]')" >> $GITHUB_ENV
+          echo "ZLIBHASH=$(git submodule status zlib | tr -d '[:blank:]')" >> $GITHUB_ENV
+      - name: Cache Submodules
+        id: cache-sub
+        uses: actions/cache@v4
+        with:
+          path: |
+            SDL/build
+            zlib_build_arm
+            zlib_build_intel
+          key: sub-macos-${{ env.SDLHASH }}-${{ env.ZLIBHASH }}
+      - name: Build SDL2 and zlib
+        if: steps.cache-sub.outputs.cache-hit != 'true'
+        run: |
+          export CC=clang
+          export CFLAGS="-target arm64-apple-macos11"
+          export ZLIB_BUILD=zlib_build_arm
           make -f makefile.zlib
+          export CFLAGS="-target x86_64-apple-macos10.13"
+          export ZLIB_BUILD=zlib_build_intel
+          make -f makefile.zlib
+          export CFLAGS=
           export CC=$(PWD)/SDL/build-scripts/clang-fat.sh
           make -f makefile.sdl
       - name: Build hatariB
         run: |
-          export OS=MacOS
-          export CC=/usr/local/bin/gcc-13
-          export CFLAGS=-mmacosx-version-min=10.13
-          export CMAKEFLAGS="-DCMAKE_C_COMPILER=/usr/local/bin/gcc-13 -DCMAKE_OSX_DEPLOYMENT_TARGET=10.13"
-          gmake
+          export CC_OLD=$CC
+          export BD=build_arm
+          export HBD=build_arm
+          export ZLIB_BUILD=zlib_build_arm
+          export CMAKEFLAGS="-DCMAKE_C_COMPILER=clang -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_SYSTEM_NAME=Darwin"
+          make hatarilib
+          export CC=clang
+          export CFLAGS="-target arm64-apple-macos11"
+          export LDFLAGS="-target arm64-apple-macos11"
+          make core
+          export BD=build_intel
+          export HBD=build_intel
+          export ZLIB_BUILD=zlib_build_intel
+          export CC=$CC_OLD
+          export CFLAGS=
+          export LDFLAGS=
+          export CMAKEFLAGS="-DCMAKE_C_COMPILER=clang -DCMAKE_OSX_DEPLOYMENT_TARGET=10.13 -DCMAKE_OSX_ARCHITECTURES=x86_64 -DCMAKE_SYSTEM_NAME=Darwin"
+          make hatarilib
+          export CC=clang
+          export CFLAGS="-target x86_64-apple-macos10.13"
+          export LDFLAGS="-target x86_64-apple-macos10.13"
+          make core
+          strip -u -r build_arm/hatarib.dylib
+          strip -u -r build_intel/hatarib.dylib
+          mkdir -p build
+          lipo -create -output build/hatarib.dylib build_arm/hatarib.dylib build_intel/hatarib.dylib
+      - name: Prepare Signature
+        if: github.event_name != 'pull_request'
+        env:
+          CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+        run: echo $CERTIFICATE | base64 --decode -o certificate.p12
+      - name: Sign Dylib
+        if: github.event_name != 'pull_request'
+        uses: indygreg/apple-code-sign-action@v1.0
+        with:
+          input_path: build/hatarib.dylib
+          p12_file: certificate.p12
+          p12_password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
       - name: Prepare Artifact
         run: |
           mkdir artifact
@@ -145,64 +235,35 @@ jobs:
           cp info/*.* artifact/info
           echo "BUILD_TAG=$(git log -1 --format="%ad--%h" --date=format-local:"%Y-%m-%d-%H%M%S")" >> $GITHUB_ENV
       - name: Upload Artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: hatarib-macos--${{ env.BUILD_TAG }}
           path: artifact/
-
-  build-rpi32:
-    name: Raspberry Pi OS 32-bit
-    runs-on: ubuntu-20.04
-    # ubuntu-latest was building with a newer GLIBC than current Rpi images, making them incompatible,
-    # but 20.04 builds seem to have an older GLIBC that is compatible.
-    steps:
-      - name: Checkout Files
-        uses: actions/checkout@v3
-      - name: Setup Ubuntu
-        run: |
-          sudo apt-get update
-          sudo apt-get install make gcc gcc-arm-linux-gnueabihf cmake
-      - name: Build SDL2 and zlib
-        run: |
-          export CC=arm-linux-gnueabihf-gcc
-          export AR=arm-linux-gnueabihf-gcc-ar
-          make -f makefile.zlib
-          export RANLIB=arm-linux-gnueabihf-gcc-ranlib
-          export CONFIGURE_FLAGS="--build=x86_64-linux --host=arm-linux-gnueabihf --target=arm-linux-gnueabihf-gcc"
-          make -f makefile.sdl
-      - name: Build hatariB
-        run: |
-          export CC=arm-linux-gnueabihf-gcc
-          export CMAKEFLAGS="-DCMAKE_SYSTEM_NAME=arm-linux-gnueabihf"
-          make
-        # CMAKE_SYSTEM_NAME informs cmake that we are cross-compiling, so that it knows to build and run cpugen natively.
-      - name: Prepare Artifact
-        run: |
-          mkdir artifact
-          cp README.md artifact
-          mkdir artifact/cores
-          cp build/*.so artifact/cores
-          mkdir artifact/info
-          cp info/*.* artifact/info
-          echo "BUILD_TAG=$(git log -1 --format="%ad--%h" --date=format-local:"%Y-%m-%d-%H%M%S")" >> $GITHUB_ENV
-      - name: Upload Artifact
-        uses: actions/upload-artifact@v3
-        with:
-          name: hatarib-rpi32--${{ env.BUILD_TAG }}
-          path: artifact/
-
 
   build-rpi64:
     name: Raspberry Pi OS 64-bit
     runs-on: ubuntu-20.04
     steps:
       - name: Checkout Files
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       - name: Setup Ubuntu
         run: |
           sudo apt-get update
           sudo apt-get install make gcc gcc-aarch64-linux-gnu cmake
+      - name: Submodule Cache Key
+        run: |
+          echo "SDLHASH=$(git submodule status SDL | tr -d '[:blank:]')" >> $GITHUB_ENV
+          echo "ZLIBHASH=$(git submodule status zlib | tr -d '[:blank:]')" >> $GITHUB_ENV
+      - name: Cache Submodules
+        id: cache-sub
+        uses: actions/cache@v4
+        with:
+          path: |
+            SDL/build
+            zlib_build
+          key: sub-rpi64-${{ env.SDLHASH }}-${{ env.ZLIBHASH }}
       - name: Build SDL2 and zlib
+        if: steps.cache-sub.outputs.cache-hit != 'true'
         run: |
           export CC=aarch64-linux-gnu-gcc
           export AR=aarch64-linux-gnu-gcc-ar
@@ -213,7 +274,62 @@ jobs:
       - name: Build hatariB
         run: |
           export CC=aarch64-linux-gnu-gcc
-          export CMAKEFLAGS="-DCMAKE_SYSTEM_NAME=aarch64-linux-gnu"
+          export CMAKEFLAGS="-DCMAKE_SYSTEM_NAME=aarch64-linux-gnu -DHAVE_DLOPEN=1"
+          make
+        # CMAKE_SYSTEM_NAME informs cmake that we are cross-compiling, so that it knows to build and run cpugen natively.
+        # HAVE_DLOPEN=1 is forced because cmake fails to find it for RPi, yet it seems perfectly available.
+      - name: Prepare Artifact
+        run: |
+          mkdir artifact
+          cp README.md artifact
+          mkdir artifact/cores
+          cp build/*.so artifact/cores
+          mkdir artifact/info
+          cp info/*.* artifact/info
+          echo "BUILD_TAG=$(git log -1 --format="%ad--%h" --date=format-local:"%Y-%m-%d-%H%M%S")" >> $GITHUB_ENV
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: hatarib-rpi64--${{ env.BUILD_TAG }}
+          path: artifact/
+
+  build-rpi32:
+    name: Raspberry Pi OS 32-bit
+    runs-on: ubuntu-20.04
+    # ubuntu-latest was building with a newer GLIBC than current Rpi images, making them incompatible,
+    # but 20.04 builds seem to have an older GLIBC that is compatible.
+    steps:
+      - name: Checkout Files
+        uses: actions/checkout@v4
+      - name: Setup Ubuntu
+        run: |
+          sudo apt-get update
+          sudo apt-get install make gcc gcc-arm-linux-gnueabihf cmake
+      - name: Submodule Cache Key
+        run: |
+          echo "SDLHASH=$(git submodule status SDL | tr -d '[:blank:]')" >> $GITHUB_ENV
+          echo "ZLIBHASH=$(git submodule status zlib | tr -d '[:blank:]')" >> $GITHUB_ENV
+      - name: Cache Submodules
+        id: cache-sub
+        uses: actions/cache@v4
+        with:
+          path: |
+            SDL/build
+            zlib_build
+          key: sub-rpi32-${{ env.SDLHASH }}-${{ env.ZLIBHASH }}
+      - name: Build SDL2 and zlib
+        if: steps.cache-sub.outputs.cache-hit != 'true'
+        run: |
+          export CC=arm-linux-gnueabihf-gcc
+          export AR=arm-linux-gnueabihf-gcc-ar
+          make -f makefile.zlib
+          export RANLIB=arm-linux-gnueabihf-gcc-ranlib
+          export CONFIGURE_FLAGS="--build=x86_64-linux --host=arm-linux-gnueabihf --target=arm-linux-gnueabihf-gcc"
+          make -f makefile.sdl
+      - name: Build hatariB
+        run: |
+          export CC=arm-linux-gnueabihf-gcc
+          export CMAKEFLAGS="-DCMAKE_SYSTEM_NAME=arm-linux-gnueabihf -DHAVE_DLOPEN=1"
           make
       - name: Prepare Artifact
         run: |
@@ -225,7 +341,135 @@ jobs:
           cp info/*.* artifact/info
           echo "BUILD_TAG=$(git log -1 --format="%ad--%h" --date=format-local:"%Y-%m-%d-%H%M%S")" >> $GITHUB_ENV
       - name: Upload Artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
-          name: hatarib-rpi64--${{ env.BUILD_TAG }}
+          name: hatarib-rpi32--${{ env.BUILD_TAG }}
+          path: artifact/
+
+  build-android64:
+    name: Android 64-bit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Files
+        uses: actions/checkout@v4
+      - name: Setup Ubuntu
+        run: |
+          sudo apt-get update
+          sudo apt-get install make gcc cmake
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+      - name: Submodule Cache Key
+        run: |
+          echo "SDLHASH=$(git submodule status SDL | tr -d '[:blank:]')" >> $GITHUB_ENV
+          echo "ZLIBHASH=$(git submodule status zlib | tr -d '[:blank:]')" >> $GITHUB_ENV
+      - name: Cache Submodules
+        id: cache-sub
+        uses: actions/cache@v4
+        with:
+          path: |
+            SDL/build
+            zlib_build
+          key: sub-android64-${{ env.SDLHASH }}-${{ env.ZLIBHASH }}
+      - name: Build SDL2 and zlib
+        if: steps.cache-sub.outputs.cache-hit != 'true'
+        run: |
+          export API=26
+          export TOOLCHAIN=$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin
+          export CC="$TOOLCHAIN/aarch64-linux-android$API-clang"
+          export AR="$TOOLCHAIN/llvm-ar"
+          make -f makefile.zlib
+          export RANLIB="$TOOLCHAIN/llvm-ranlib"
+          export CONFIGURE_FLAGS="--build=x86_64-linux --host=aarch64-linux-android --target=$CC"
+          export SDL_JOYSTICK_DISABLE=
+          export SDL_HAPTIC_DISABLE=
+          make -f makefile.sdl
+      - name: Build hatariB
+        run: |
+          export API=26
+          export TOOLCHAIN=$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin
+          export CC="$TOOLCHAIN/aarch64-linux-android$API-clang"
+          export CMAKEFLAGS="-DCMAKE_SYSTEM_NAME=Android -DCMAKE_ANDROID_ARCH_ABI=arm64-v8a -DCMAKE_ANDROID_NDK=$ANDROID_NDK_ROOT -DCMAKE_BUILD_TYPE=Release -DCMAKE_SYSTEM_VERSION=$API"
+          make
+      - name: Prepare Artifact
+        run: |
+          mkdir artifact
+          cp README.md artifact
+          mkdir artifact/cores
+          cp build/*.so artifact/cores
+          mkdir artifact/info
+          cp info/*.* artifact/info
+          echo "BUILD_TAG=$(git log -1 --format="%ad--%h" --date=format-local:"%Y-%m-%d-%H%M%S")" >> $GITHUB_ENV
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: hatarib-android64--${{ env.BUILD_TAG }}
+          path: artifact/
+
+  build-android32:
+    name: Android 32-bit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Files
+        uses: actions/checkout@v4
+      - name: Setup Ubuntu
+        run: |
+          sudo apt-get update
+          sudo apt-get install make gcc cmake
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+      - name: Submodule Cache Key
+        run: |
+          echo "SDLHASH=$(git submodule status SDL | tr -d '[:blank:]')" >> $GITHUB_ENV
+          echo "ZLIBHASH=$(git submodule status zlib | tr -d '[:blank:]')" >> $GITHUB_ENV
+      - name: Cache Submodules
+        id: cache-sub
+        uses: actions/cache@v4
+        with:
+          path: |
+            SDL/build
+            zlib_build
+          key: sub-android32-${{ env.SDLHASH }}-${{ env.ZLIBHASH }}
+      - name: Build SDL2 and zlib
+        if: steps.cache-sub.outputs.cache-hit != 'true'
+        run: |
+          export API=26
+          export TOOLCHAIN=$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin
+          export CC="$TOOLCHAIN/armv7a-linux-androideabi$API-clang"
+          export AR="$TOOLCHAIN/llvm-ar"
+          make -f makefile.zlib
+          export RANLIB="$TOOLCHAIN/llvm-ranlib"
+          export CONFIGURE_FLAGS="--build=x86_64-linux --host=armv7a-linux-androideabi --target=$CC"
+          export SDL_JOYSTICK_DISABLE=
+          export SDL_HAPTIC_DISABLE=
+          make -f makefile.sdl
+      - name: Build hatariB
+        run: |
+          export API=26
+          export TOOLCHAIN=$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin
+          export CC="$TOOLCHAIN/armv7a-linux-androideabi$API-clang"
+          export CMAKEFLAGS="-DCMAKE_SYSTEM_NAME=Android -DCMAKE_ANDROID_ARCH_ABI=armeabi-v7a -DCMAKE_ANDROID_NDK=$ANDROID_NDK_ROOT -DCMAKE_BUILD_TYPE=Release -DCMAKE_SYSTEM_VERSION=$API"
+          make
+      - name: Prepare Artifact
+        run: |
+          mkdir artifact
+          cp README.md artifact
+          mkdir artifact/cores
+          cp build/*.so artifact/cores
+          mkdir artifact/info
+          cp info/*.* artifact/info
+          echo "BUILD_TAG=$(git log -1 --format="%ad--%h" --date=format-local:"%Y-%m-%d-%H%M%S")" >> $GITHUB_ENV
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: hatarib-android32--${{ env.BUILD_TAG }}
           path: artifact/

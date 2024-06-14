@@ -1,6 +1,18 @@
-secrets/
-zlib_build/
+# build output folders
 build/
-cv2pdb/
+hatari/build/
+zlib_build/
+SDL/build/
+
+# test files for vscode launch
 vscode/test_*.bat
+
+# personal notes, usefl tool links
+secrets/
 *.lnk
+
+# visual studio debugging creates some extra folders
+cv2pdb/
+.vs/
+zlib/out/
+zlib/zconf.h.included
